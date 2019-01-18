@@ -1,63 +1,39 @@
-heat_template_version: 2013-05-23
+heat_template_version: 2016-10-14
 
-description: >
-  Heat WordPress template to deploy WordPress on a single instance using Heat's
-  software orchestration feature.
-
-  This template defines two SoftwareConfigs (one for the DB, one for WordPress)
-  which reference separate scripts. Both of those SoftwareConfigs are associated
-  to the same server via SoftwareDeployment definitions.
-  For software configuration to work, the used image has to be prepared using
-  image builder to contain the required elements as described in file
-  hot/software-config/elements/README.rst in the heat-templates github repo.
-
-  This template has been tested to work on Heat Icehouse using neutron network
-  and using a Fedora 20 image. For differing setups, adaptations may be
-  necessary.
+description: Template Create Wordpress
 
 parameters:
   key_name:
     type: string
     description: Name of a key pair to enable SSH access to instances.
-    default: default
   flavor:
     type: string
     description: Flavor to use for the WordPress server.
-    constraints:
-      - custom_constraint: nova.flavor
   image:
     type: string
-    description: >
-      Name or ID of the image to use for the WordPress server.
-      Recommended values are fedora-20.i386 or fedora-20.x86_64.
-      Those images can be obtained from
-      http://cloud.fedoraproject.org/fedora-20.i386.qcow2 or from
-      http://cloud.fedoraproject.org/fedora-20.x86_64.qcow2 .
-      The used image also has to have elements for software config built in.
-    default: fedora-20.x86_64
+    description: Image From Wordpress
+    default: Fedora 26
   db_name:
     type: string
     description: WordPress database name
     default: wordpress
-    constraints:
-      - length: { min: 1, max: 64 }
-        description: db_name must be between 1 and 64 characters
-      - allowed_pattern: '[a-zA-Z][a-zA-Z0-9]*'
-        description: >
-          db_name must begin with a letter and contain only alphanumeric
-          characters
   db_username:
     type: string
     description: The WordPress database admin account username
     default: admin
-    hidden: true
-    constraints:
-      - length: { min: 1, max: 16 }
-        description: db_username must be between 1 and 64 characters
-      - allowed_pattern: '[a-zA-Z][a-zA-Z0-9]*'
-        description: >
-          db_username must begin with a letter and contain only alphanumeric
-          characters
+  private_network:
+    type: string
+    label: Private Network
+    description: Setup Private network
+  username:
+    type: string
+    label: Set Username
+    description: Set username to virtual machine.
+  public_network:
+    type: string
+    label: Public network name or ID
+    description: Public network to attach server to.
+    default: Public_Network
 
 resources:
   wordpress_config:
@@ -70,6 +46,58 @@ resources:
         - name: db_ipaddr
       group: script
       config: { get_file: wp_install.sh }
+
+  secgroup:
+    type: OS::Neutron::SecurityGroup
+    properties:
+      name:
+        list_join: [-, [{ get_param: 'OS::stack_name' },neo,secgroup]]
+      rules:
+        - protocol: icmp
+        - protocol: udp
+        - protocol: tcp
+          port_range_min: 22
+          port_range_max: 22
+        - protocol: tcp
+          port_range_min: 443
+          port_range_max: 443
+        - protocol: tcp
+          port_range_min: 80
+          port_range_max: 80
+        - remote_mode: remote_group_id
+
+  define_port:
+    type: OS::Neutron::Port
+    properties:
+      admin_state_up: true
+      network_id: { get_param: private_network }
+      security_groups:
+        - {get_resource: secgroup}
+
+  floating:
+    type: OS::Neutron::FloatingIP
+    properties:
+      floating_network: {get_param: public_network}
+      port_id: {get_resource: define_port}
+
+  cloud_config:
+    type: OS::Heat::MultipartMime
+    properties:
+      parts:
+        - config:
+            str_replace:
+              params:
+                $USERNAME : { get_param: username }
+              template: |
+                #cloud-config
+                system_info:
+                  default_user:
+                    name: $USERNAME
+                    lock_passwd: true
+                    gecos: Instances Interactive User
+                    groups: [wheel, adm, systemd-journal]
+                    sudo: ["ALL=(ALL) NOPASSWD:ALL"]
+                    shell: /bin/bash
 
   db_config:
     type: OS::Heat::SoftwareConfig
@@ -118,16 +146,26 @@ resources:
   wordpress_instance:
     type: OS::Nova::Server
     properties:
+      name: { get_param: 'OS::stack_name' }
       image: { get_param: image }
       flavor: { get_param: flavor }
       key_name: { get_param: key_name }
-      user_data_format: SOFTWARE_CONFIG
+      networks:
+        - port: {get_resource: define_port}
+      user_data_format: RAW
+      user_data: {get_resource: cloud_config}
 
 outputs:
-  WebsiteURL:
-    description: URL for Wordpress wiki
-    value:
-      str_replace:
-        template: http://host/wordpress
-        params:
-          host: { get_attr: [wordpress_instance, networks, private, 0] }
+  user:
+    description: User Name
+    value: {get_param: username}
+  controller:
+    description: Controller IP
+    value: {get_attr: [floating,floating_ip_address]}
+  key_name:
+    description: Key Name
+    value: {get_param: key_name}
+
+  wordpress:
+    description: wordpress folder
+    value: /etc/wordpress
